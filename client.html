@@ -1,0 +1,64 @@
+<div style="max-width: 300px;">
+<div class="ulist" style="max-height: 200px;overflow-y: scroll;"></div>
+<div class="logs" style="max-height: 200px;overflow-y: scroll;"></div>
+<input type="text" id="q" style="display: hidden;">
+</div>
+<button class="join-chan" name="chan1">chan1</button>
+<button class="join-chan" name="chan2">chan2</button>
+<button class="join-chan" name="chan3">chan3</button>
+<button class="leave-chan">leave chan</button>
+
+<script>
+    const socket = new WebSocket('ws://localhost:8080');
+
+    socket.addEventListener('open', event => {
+        const q = document.querySelector('#q');
+        q.addEventListener('keypress', e => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                let chan = 'global';
+                if (q.value.trim().split(' ')[0]?.charAt(0) === '/') { chan = q.value.trim().split(' ')[0]?.substring(1) }
+                socket.send(JSON.stringify({type: 'message', q: q.value, chan: chan}));
+                q.value = '';
+            }
+        });
+
+        window.addEventListener('keypress', e => {
+            if (['w'].includes(e.key)) {
+                socket.send(JSON.stringify({type: 'move', d: 'w'}));
+            }
+        });
+
+        document.querySelectorAll('.join-chan').forEach(btn => {
+            btn.addEventListener('click', e => {
+                socket.send(JSON.stringify({type: 'join-chan', chan: e.target.name}));
+            });
+        });
+
+        document.querySelector('.leave-chan').addEventListener('click', e => {
+            socket.send(JSON.stringify({type: 'leave-chan'}));
+        });
+
+    });
+
+    
+    socket.addEventListener('message', event => {
+        console.log('Message from server: ', event.data);
+
+        const dataJson = JSON.parse(event.data);
+        console.log(dataJson);
+
+        if (dataJson.type === 'logs' || dataJson.type === 'error') {
+            document.querySelector('.logs').innerText += dataJson.logText;
+            const breakTag = document.createElement('br');
+            document.querySelector('.logs').appendChild(breakTag);
+        } else if (dataJson.type === 'ulist-update') {
+            document.querySelector('.ulist').innerText = '';
+            dataJson.ulist?.forEach(user => {
+                document.querySelector('.ulist').innerText += user;
+                const breakTag = document.createElement('br');
+                document.querySelector('.ulist').appendChild(breakTag);
+            });
+        }
+    });
+</script>
