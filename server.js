@@ -2,6 +2,7 @@ import WebSocket, { WebSocketServer } from "ws";
 
 const messageObjs = [];
 let users = [];
+let userMap = { };
 let chans = {
     'chan1': {maxUsers: 5, users: []},
     'chan2': {maxUsers: 3, users: []},
@@ -27,11 +28,12 @@ wss.on('connection', function connection(ws) {
     ws._chan = null;
     
     /* initialize */
-    ws._x = 0;
-    ws._y = 0;
+    ws._cur_pos = { x: 0, y: 0 };
+    ws._max_speed = 4.5; /* arbitrary num */
 
     numConnections++;
     users.push(ws._user_id);
+    userMap[ws._user_id] = ws;
 
     ws.on('error', console.error);
 
@@ -46,7 +48,16 @@ wss.on('connection', function connection(ws) {
 
         if (!dataJson) return;
         
-        if (dataJson?.type === 'move') { /**/ return; }
+        if (dataJson?.type === 'move') { /* update the user's target position */ 
+            if (typeof dataJson.targetPos?.x === 'number' && typeof dataJson.targetPos?.y === 'number') {
+                ws._target_pos = { x : dataJson.targetPos.x, y : dataJson.targetPos.y };
+                if (JSON.stringify(ws._cur_pos) !== (JSON.stringify(ws._target_pos))) { ws._moving = true; }
+                console.log('user ' + ws._user_id + ' wants to move to ' + JSON.stringify(ws._target_pos));
+            }
+            
+            return; 
+        }
+
         if (dataJson?.type === 'join-chan') { 
             if (!(dataJson.chan)) { ws.send(JSON.stringify({type: 'error', logText: 'No channel specified'})); return; }
             if (!(Object.keys(chans).includes(dataJson.chan))) { ws.send(JSON.stringify({type: 'error', logText: 'Invalid channel specified'})); return; }
@@ -103,6 +114,7 @@ wss.on('connection', function connection(ws) {
     ws.on('close', function message() {
         numConnections--;
         users = users.filter(item => item !== ws._user_id);
+        delete userMap[ws._user_id];
         wss.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) { 
                 // client.send('a websocket was closed'); 
@@ -124,3 +136,49 @@ function createRandomString(length) {
     }
     return result;
 }
+
+setInterval(serverTick, 1000 / 50, userMap);
+
+function serverTick(userMap) {
+    console.log('server ticking');
+    /* check if we need to move any players */
+
+    const payload = { type: 'playerPositions', positions: { } };
+
+    Object.values(userMap).forEach(user => {
+        if (user._moving) {
+            const userNewPosition = lerp(user._cur_pos, user._target_pos, user._max_speed);
+            user._cur_pos = userNewPosition;
+            payload.positions[user._user_id] = user._cur_pos;
+            console.log(JSON.stringify(user._cur_pos));
+            if (user._cur_pos.x === user._target_pos.x && user._cur_pos.y === user._target_pos.y) { user._moving = false; }
+        }
+    });
+
+    /* broadcast the new user positions */
+    wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            // client.send('a websocket connection was opened');
+            client.send(JSON.stringify(payload));
+        }
+    });
+
+};
+
+
+function lerp(curPos, targetPos, speed) {
+    const dx = targetPos.x - curPos.x;
+    const dy = targetPos.y - curPos.y;
+    const dist = Math.hypot(dx, dy);
+
+    if (dist === 0) return curPos;      
+    if (dist <= speed) return targetPos;
+
+    const ratio = speed / dist;       
+
+    return {
+        x: curPos.x + dx * ratio,
+        y: curPos.y + dy * ratio
+    };
+}
+
