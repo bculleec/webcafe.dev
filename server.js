@@ -108,6 +108,10 @@ wss.on('connection', function connection(ws) {
             // client.send('a websocket connection was opened');
             client.send(JSON.stringify({type: 'logs', logText:ws._user_id + ' joined the server'}));
             client.send(JSON.stringify({type: 'ulist-update', ulist: users}));
+
+            sendPositionsAll(client);
+
+    
         }
     });
 
@@ -120,27 +124,30 @@ wss.on('connection', function connection(ws) {
                 // client.send('a websocket was closed'); 
                 client.send(JSON.stringify({type: 'logs', logText:ws._user_id + ' left the server'}));
                 client.send(JSON.stringify({type: 'ulist-update', ulist: users}));
+
+                sendPositionsAll(client);
             }
         })
     });
     console.log('total connected users: ' + numConnections);
 });
 
-/* helpers */
-function createRandomString(length) {
-    const chars = 'ABCDEFG12345';
-    let result = '';
-
-    for (let i = 0; i < length; i++) {
-        result += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return result;
-}
-
 setInterval(serverTick, 1000 / 50, userMap);
 
+function sendPositionsAll(client) {
+    /* refresh all positions for all players because someone just joined*/
+    const payload = { type: "playerPositions" ,  positions: {  }, refresh: true};
+
+    for (const user of wss.clients) {
+        payload.positions[user._user_id] = user._cur_pos;
+    }
+    if (client.readyState === WebSocket.OPEN) {
+        // client.send('a websocket connection was opened');
+        client.send(JSON.stringify(payload));
+    }
+}
+
 function serverTick(userMap) {
-    console.log('server ticking');
     /* check if we need to move any players */
 
     const payload = { type: 'playerPositions', positions: { } };
@@ -155,6 +162,8 @@ function serverTick(userMap) {
         }
     });
 
+    if (!(Object.keys(payload.positions).length)) return; /* no need to broadcast if nothing has changed */
+
     /* broadcast the new user positions */
     wss.clients.forEach(client => {
         if (client.readyState === WebSocket.OPEN) {
@@ -165,6 +174,16 @@ function serverTick(userMap) {
 
 };
 
+/* helpers */
+function createRandomString(length) {
+    const chars = 'ABCDEFG12345';
+    let result = '';
+
+    for (let i = 0; i < length; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
+}
 
 function lerp(curPos, targetPos, speed) {
     const dx = targetPos.x - curPos.x;
@@ -181,4 +200,3 @@ function lerp(curPos, targetPos, speed) {
         y: curPos.y + dy * ratio
     };
 }
-
