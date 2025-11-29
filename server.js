@@ -29,7 +29,7 @@ wss.on('connection', function connection(ws) {
     
     /* initialize */
     ws._cur_pos = { x: 0, y: 0 };
-    ws._max_speed = 4.5; /* arbitrary num */
+    ws._max_speed = 0.2; /* arbitrary num */
 
     numConnections++;
     users.push(ws._user_id);
