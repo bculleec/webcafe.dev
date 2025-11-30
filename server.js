@@ -1,7 +1,6 @@
 import WebSocket, { WebSocketServer } from "ws";
 
 const messageObjs = [];
-let users = [];
 let userMap = { };
 let chans = {
     'chan1': {maxUsers: 5, users: []},
@@ -9,8 +8,12 @@ let chans = {
     'chan3': {maxUsers: 2, users: []}
 };
 
+const MAX_USER_TIMEOUT = 120 * 1000; // milli seconds
+
 const MIN_WORLD_LIMIT = -15;
 const MAX_WORLD_LIMIT = 15;
+
+const MAX_MESSAGES_PER_SECOND = 100;
 
 let numConnections = 0;
 
@@ -22,7 +25,7 @@ wss.on('connection', function connection(ws) {
 
     // assign an anonymous id to this user
     let randString = createRandomString(10);
-    while (users.includes(randString)) {
+    while (Object.keys(userMap).includes(randString)) {
         randString = createRandomString(10);
     } 
 
@@ -34,14 +37,30 @@ wss.on('connection', function connection(ws) {
     ws._cur_pos = { x: 0, y: 0 };
     ws._max_speed = 6; /* units per second */
     ws._color = getRandomColor();
+    ws._last_pinged = Date.now();
+
+    ws._messages_past_second = 0;
+    ws._last_rate_limit_reset = Date.now();
 
     numConnections++;
-    users.push(ws._user_id);
+    // users.push(ws._user_id);
     userMap[ws._user_id] = ws;
 
     ws.on('error', console.error);
 
     ws.on('message', function message(data) {
+
+        /* rate limiting */
+        const now = Date.now();
+        if (now - ws._last_rate_limit_reset >= 1000) {
+            ws._messages_past_second = 0;
+            ws._last_rate_limit_reset = now;
+        }
+
+        if (ws._messages_past_second >= MAX_MESSAGES_PER_SECOND) { return; } /* hitting us too often */
+        ws._messages_past_second++;
+        /* */
+
         console.log('received: %s', data);
         let dataJson;
         try {
@@ -88,6 +107,9 @@ wss.on('connection', function connection(ws) {
                 ws._chan = null;
             }
             return;
+        } else if (dataJson?.type === 'ping') {
+            console.log('received a ping from ', ws._user_id);
+            ws._last_pinged = Date.now();
         }
         
         const logMsg = { user: ws._user_id, content: dataJson.q?.toString(), at: Date.now(), chan: dataJson.chan };
@@ -112,7 +134,7 @@ wss.on('connection', function connection(ws) {
         if (client.readyState === WebSocket.OPEN) {
             // client.send('a websocket connection was opened');
             client.send(JSON.stringify({type: 'logs', logText:ws._user_id + ' joined the server'}));
-            client.send(JSON.stringify({type: 'ulist-update', ulist: users}));
+            client.send(JSON.stringify({type: 'ulist-update', ulist: Object.keys(userMap)}));
 
             sendPositionsAll(client);
 
@@ -122,13 +144,13 @@ wss.on('connection', function connection(ws) {
 
     ws.on('close', function message() {
         numConnections--;
-        users = users.filter(item => item !== ws._user_id);
+        // users = users.filter(item => item !== ws._user_id);
         delete userMap[ws._user_id];
         wss.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) { 
                 // client.send('a websocket was closed'); 
                 client.send(JSON.stringify({type: 'logs', logText:ws._user_id + ' left the server'}));
-                client.send(JSON.stringify({type: 'ulist-update', ulist: users}));
+                client.send(JSON.stringify({type: 'ulist-update', ulist: Object.keys(userMap)}));
 
                 sendPositionsAll(client);
             }
@@ -138,6 +160,45 @@ wss.on('connection', function connection(ws) {
 });
 
 setInterval(serverTick, 1000 / 50, userMap);
+
+setInterval(checkGhosts, MAX_USER_TIMEOUT, userMap);
+
+function checkGhosts(userMap) {
+    const currentTime = Date.now();
+
+    for (const user of Object.keys(userMap)) {
+        console.log(userMap[user]?._last_pinged);
+        if (!(userMap[user]?._last_pinged)) {
+                kickUser(user);
+                continue;
+        }
+
+        const timeSinceLastPing = currentTime - userMap[user]._last_pinged;
+        console.log(user + ' time since last ping: ', timeSinceLastPing);
+        if (timeSinceLastPing > MAX_USER_TIMEOUT) { kickUser( user ); }
+    }
+}
+
+function kickUser(user) {
+
+    console.log('kicking user ', user);
+
+    wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) { 
+            // client.send('a websocket was closed'); 
+            client.send(JSON.stringify({type: 'logs', logText:user + ' was kicked'}));
+            client.send(JSON.stringify({type: 'ulist-update', ulist: Object.keys(userMap)}));
+
+            sendPositionsAll(client);
+        }
+    });
+    if (userMap[user].readyState === WebSocket.OPEN) { userMap[user].terminate(); }
+
+    numConnections--;
+    // users = users.filter(item => item !== user);
+    delete userMap[user];
+
+}
 
 function sendPositionsAll(client) {
     /* refresh all positions for all players because someone just joined*/
