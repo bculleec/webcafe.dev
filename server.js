@@ -9,6 +9,9 @@ let chans = {
     'chan3': {maxUsers: 2, users: []}
 };
 
+const MIN_WORLD_LIMIT = -15;
+const MAX_WORLD_LIMIT = 15;
+
 let numConnections = 0;
 
 const wss = new WebSocketServer({ port: 8080 }, () => {
@@ -29,7 +32,8 @@ wss.on('connection', function connection(ws) {
     
     /* initialize */
     ws._cur_pos = { x: 0, y: 0 };
-    ws._max_speed = 0.2; /* arbitrary num */
+    ws._max_speed = 6; /* units per second */
+    ws._color = getRandomColor();
 
     numConnections++;
     users.push(ws._user_id);
@@ -50,6 +54,7 @@ wss.on('connection', function connection(ws) {
         
         if (dataJson?.type === 'move') { /* update the user's target position */ 
             if (typeof dataJson.targetPos?.x === 'number' && typeof dataJson.targetPos?.y === 'number') {
+                if (dataJson.targetPos.x < MIN_WORLD_LIMIT || dataJson.targetPos.x > MAX_WORLD_LIMIT || dataJson.targetPos.y < MIN_WORLD_LIMIT || dataJson.targetPos.y > MAX_WORLD_LIMIT) {return;}
                 ws._target_pos = { x : dataJson.targetPos.x, y : dataJson.targetPos.y };
                 if (JSON.stringify(ws._cur_pos) !== (JSON.stringify(ws._target_pos))) { ws._moving = true; }
                 console.log('user ' + ws._user_id + ' wants to move to ' + JSON.stringify(ws._target_pos));
@@ -139,22 +144,33 @@ function sendPositionsAll(client) {
     const payload = { type: "playerPositions" ,  positions: {  }, refresh: true};
 
     for (const user of wss.clients) {
-        payload.positions[user._user_id] = user._cur_pos;
+        payload.positions[user._user_id] = JSON.parse(JSON.stringify(user._cur_pos));
+        if (client._user_id === user._user_id) { payload.positions[user._user_id].self = true }
+        payload.positions[user._user_id].color = user._color;
     }
     if (client.readyState === WebSocket.OPEN) {
         // client.send('a websocket connection was opened');
+        console.log(JSON.stringify(payload) + " sent to " + client._user_id);
         client.send(JSON.stringify(payload));
     }
 }
 
-function serverTick(userMap) {
+let previousTickTimeStamp = Date.now();
+
+async function serverTick(userMap) {
+
+    /* get time elapsed from previous tick */
+    const currentTime = Date.now();
+    let deltaTime = currentTime - previousTickTimeStamp;
+    previousTickTimeStamp = currentTime;
+
     /* check if we need to move any players */
 
     const payload = { type: 'playerPositions', positions: { } };
 
     Object.values(userMap).forEach(user => {
         if (user._moving) {
-            const userNewPosition = lerp(user._cur_pos, user._target_pos, user._max_speed);
+            const userNewPosition = lerp(user._cur_pos, user._target_pos, user._max_speed, deltaTime);
             user._cur_pos = userNewPosition;
             payload.positions[user._user_id] = user._cur_pos;
             console.log(JSON.stringify(user._cur_pos));
@@ -185,10 +201,13 @@ function createRandomString(length) {
     return result;
 }
 
-function lerp(curPos, targetPos, speed) {
+function lerp(curPos, targetPos, speed, deltaTime) {
     const dx = targetPos.x - curPos.x;
     const dy = targetPos.y - curPos.y;
     const dist = Math.hypot(dx, dy);
+
+    /* the user's speed represents amount moved per deltatime*/
+    speed = speed * deltaTime / 1000;
 
     if (dist === 0) return curPos;      
     if (dist <= speed) return targetPos;
@@ -199,4 +218,9 @@ function lerp(curPos, targetPos, speed) {
         x: curPos.x + dx * ratio,
         y: curPos.y + dy * ratio
     };
+}
+
+function getRandomColor() {
+    const randomColor = Math.floor(Math.random() * 16777215);
+    return randomColor;
 }
