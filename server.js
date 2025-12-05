@@ -1,4 +1,5 @@
 import WebSocket, { WebSocketServer } from "ws";
+import { createRandomString, lerp, getRandomColor } from './helpers.js';
 
 const messageObjs = [];
 let userMap = { };
@@ -61,7 +62,7 @@ wss.on('connection', function connection(ws) {
         ws._messages_past_second++;
         /* */
 
-        console.log('received: %s', data);
+        // console.log('received: %s', data);
         let dataJson;
         try {
             dataJson = JSON.parse(data);
@@ -76,7 +77,7 @@ wss.on('connection', function connection(ws) {
                 if (dataJson.targetPos.x < MIN_WORLD_LIMIT || dataJson.targetPos.x > MAX_WORLD_LIMIT || dataJson.targetPos.y < MIN_WORLD_LIMIT || dataJson.targetPos.y > MAX_WORLD_LIMIT) {return;}
                 ws._target_pos = { x : dataJson.targetPos.x, y : dataJson.targetPos.y };
                 if (JSON.stringify(ws._cur_pos) !== (JSON.stringify(ws._target_pos))) { ws._moving = true; }
-                console.log('user ' + ws._user_id + ' wants to move to ' + JSON.stringify(ws._target_pos));
+                // console.log('user ' + ws._user_id + ' wants to move to ' + JSON.stringify(ws._target_pos));
             }
             
             return; 
@@ -110,11 +111,17 @@ wss.on('connection', function connection(ws) {
         } else if (dataJson?.type === 'ping') {
             console.log('received a ping from ', ws._user_id);
             ws._last_pinged = Date.now();
+        } else if (dataJson?.type === 'set_name') {
+            console.log(ws._user_id + ' wants to set their name to ' + dataJson.username);
+            ws._display_name = dataJson.username ?? ws._user_id;
+
+            sendPositionsAll();
+            return;
         }
         
         const logMsg = { user: ws._user_id, content: dataJson.q?.toString(), at: Date.now(), chan: dataJson.chan };
         messageObjs.push(logMsg); 
-        console.log(logMsg);
+        // console.log(logMsg);
         
         if (dataJson.chan && dataJson.chan === 'global') {
             wss.clients.forEach(client => {
@@ -167,14 +174,14 @@ function checkGhosts(userMap) {
     const currentTime = Date.now();
 
     for (const user of Object.keys(userMap)) {
-        console.log(userMap[user]?._last_pinged);
+        // console.log(userMap[user]?._last_pinged);
         if (!(userMap[user]?._last_pinged)) {
                 kickUser(user);
                 continue;
         }
 
         const timeSinceLastPing = currentTime - userMap[user]._last_pinged;
-        console.log(user + ' time since last ping: ', timeSinceLastPing);
+        // console.log(user + ' time since last ping: ', timeSinceLastPing);
         if (timeSinceLastPing > MAX_USER_TIMEOUT) { kickUser( user ); }
     }
 }
@@ -205,13 +212,16 @@ function sendPositionsAll(client) {
     const payload = { type: "playerPositions" ,  positions: {  }, refresh: true};
 
     for (const user of wss.clients) {
+        console.log(user._display_name);
         payload.positions[user._user_id] = JSON.parse(JSON.stringify(user._cur_pos));
-        if (client._user_id === user._user_id) { payload.positions[user._user_id].self = true }
+        if (client?._user_id === user._user_id) { payload.positions[user._user_id].self = true }
         payload.positions[user._user_id].color = user._color;
+        payload.positions[user._user_id]._display_name = user._display_name ? user._display_name : user._user_id;
     }
-    if (client.readyState === WebSocket.OPEN) {
+    if (client?.readyState === WebSocket.OPEN) {
         // client.send('a websocket connection was opened');
-        console.log(JSON.stringify(payload) + " sent to " + client._user_id);
+        // console.log(JSON.stringify(payload) + " sent to " + client._user_id);
+        console.log(payload);
         client.send(JSON.stringify(payload));
     }
 }
@@ -231,10 +241,13 @@ async function serverTick(userMap) {
 
     Object.values(userMap).forEach(user => {
         if (user._moving) {
+
             const userNewPosition = lerp(user._cur_pos, user._target_pos, user._max_speed, deltaTime);
             user._cur_pos = userNewPosition;
-            payload.positions[user._user_id] = user._cur_pos;
-            console.log(JSON.stringify(user._cur_pos));
+            payload.positions[user._user_id] = JSON.parse(JSON.stringify(user._cur_pos));
+            payload.positions[user._user_id].color = user._color;
+            payload.positions[user._user_id]._display_name = user._display_name;
+            // console.log(JSON.stringify(user._cur_pos));
             if (user._cur_pos.x === user._target_pos.x && user._cur_pos.y === user._target_pos.y) { user._moving = false; }
         }
     });
@@ -250,38 +263,3 @@ async function serverTick(userMap) {
     });
 
 };
-
-/* helpers */
-function createRandomString(length) {
-    const chars = 'ABCDEFG12345';
-    let result = '';
-
-    for (let i = 0; i < length; i++) {
-        result += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return result;
-}
-
-function lerp(curPos, targetPos, speed, deltaTime) {
-    const dx = targetPos.x - curPos.x;
-    const dy = targetPos.y - curPos.y;
-    const dist = Math.hypot(dx, dy);
-
-    /* the user's speed represents amount moved per deltatime*/
-    speed = speed * deltaTime / 1000;
-
-    if (dist === 0) return curPos;      
-    if (dist <= speed) return targetPos;
-
-    const ratio = speed / dist;       
-
-    return {
-        x: curPos.x + dx * ratio,
-        y: curPos.y + dy * ratio
-    };
-}
-
-function getRandomColor() {
-    const randomColor = Math.floor(Math.random() * 16777215);
-    return randomColor;
-}
