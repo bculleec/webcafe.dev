@@ -1,265 +1,311 @@
-import WebSocket, { WebSocketServer } from "ws";
-import { createRandomString, lerp, getRandomColor } from './helpers.js';
+/* imports */
 
-const messageObjs = [];
-let userMap = { };
-let chans = {
-    'chan1': {maxUsers: 5, users: []},
-    'chan2': {maxUsers: 3, users: []},
-    'chan3': {maxUsers: 2, users: []}
-};
+import { WebSocketServer } from "ws";
+import { createRandomString, getRandomColor, lerp } from "./helpers.js";
 
-const MAX_USER_TIMEOUT = 120 * 1000; // milli seconds
+/* constants */
+const SERVER_LISTEN_PORT = 8080;
+const SERVER_TICK_RATE_HZ = 50;
+const MAX_USER_TIMEOUT = 120 * 1000; // milliseconds (time a client is allowed to be on the server without sending a heartbeat)
+const MAX_MESSAGES_PER_SECOND = 100; // rate limit the user
+const MAX_MESSAGE_CHARACTER_LENGTH = 71;
+const PLAYER_ID_CHARACTER_LENGTH = 10;
 
 const MIN_WORLD_LIMIT = -15;
-const MAX_WORLD_LIMIT = 15;
+const MAX_WORLD_LIMIT = 15; // used for bounds checking
 
-const MAX_MESSAGES_PER_SECOND = 100;
+/* global players object */
+const userMap = {};
 
-let numConnections = 0;
-
-const wss = new WebSocketServer({ port: 8080 }, () => {
-    console.log('the server is listening');
+/* start the server */
+const wss = new WebSocketServer({ port: SERVER_LISTEN_PORT }, () => {
+    console.log(`Server is listening on port ${SERVER_LISTEN_PORT}`);
 });
 
-wss.on('connection', function connection(ws) {
+/* websocket server event listeners */
+wss.on('connection', handleNewClientConnection);
 
-    // assign an anonymous id to this user
-    let randString = createRandomString(10);
-    while (Object.keys(userMap).includes(randString)) {
-        randString = createRandomString(10);
-    } 
+/* websocket server event handlers */
+function handleNewClientConnection (ws) {
 
-    /* assign a random id */
-    ws._user_id = randString;
-    ws._chan = null;
+    /* a new client joins */
+    const newId = generateUserId(PLAYER_ID_CHARACTER_LENGTH, Object.keys(userMap));
     
-    /* initialize */
-    ws._cur_pos = { x: 0, y: 0 };
-    ws._max_speed = 6; /* units per second */
-    ws._color = getRandomColor();
-    ws._last_pinged = Date.now();
+    initializeUserProperties(ws, newId);
+    addToUserMap(userMap, newId, ws);
+    alertExistingClients(newId, userMap, 'join');
 
-    ws._messages_past_second = 0;
-    ws._last_rate_limit_reset = Date.now();
+    /* client events */
+    ws.on('error', handleClientError);
 
-    numConnections++;
-    // users.push(ws._user_id);
-    userMap[ws._user_id] = ws;
+    ws.on('message', (data) => { handleClientMessage(data, ws) });
 
-    ws.on('error', console.error);
+    ws.on('close', () => { handleClientLeaveEvent(ws) });
+};
 
-    ws.on('message', function message(data) {
+/* client event handlers */
 
-        /* rate limiting */
-        const now = Date.now();
-        if (now - ws._last_rate_limit_reset >= 1000) {
-            ws._messages_past_second = 0;
-            ws._last_rate_limit_reset = now;
-        }
+function handleClientLeaveEvent(user) {
+    delete userMap[user._user_id];
+    alertExistingClients(user._user_id, userMap, 'leave');
+}
 
-        if (ws._messages_past_second >= MAX_MESSAGES_PER_SECOND) { return; } /* hitting us too often */
-        ws._messages_past_second++;
-        /* */
+function handleClientError(error) {
+    console.error(error);
+}
 
-        // console.log('received: %s', data);
-        let dataJson;
-        try {
-            dataJson = JSON.parse(data);
-        } catch (err) {
-            console.error(err);
-        }
+function handleClientMessage(data, user) {
+    /* rate limit check the user */
+    if (exceededRateLimit(user)) { 
+        sendRateLimitExceededError(user);
+        return; /* hitting us too often */ 
+    }
+    incrementUserMessageCount(user);
 
-        if (!dataJson) return;
-        
-        if (dataJson?.type === 'move') { /* update the user's target position */ 
-            if (typeof dataJson.targetPos?.x === 'number' && typeof dataJson.targetPos?.y === 'number') {
-                if (dataJson.targetPos.x < MIN_WORLD_LIMIT || dataJson.targetPos.x > MAX_WORLD_LIMIT || dataJson.targetPos.y < MIN_WORLD_LIMIT || dataJson.targetPos.y > MAX_WORLD_LIMIT) {return;}
-                ws._target_pos = { x : dataJson.targetPos.x, y : dataJson.targetPos.y };
-                if (JSON.stringify(ws._cur_pos) !== (JSON.stringify(ws._target_pos))) { ws._moving = true; }
-                // console.log('user ' + ws._user_id + ' wants to move to ' + JSON.stringify(ws._target_pos));
-            }
-            
-            return; 
-        }
+    /* parse the data */
+    let jsonData;
+    try {
+        jsonData = JSON.parse(data);
+    } catch (error) {
+        console.error(error);
+        return;
+    }
 
-        if (dataJson?.type === 'join-chan') { 
-            if (!(dataJson.chan)) { ws.send(JSON.stringify({type: 'error', logText: 'No channel specified'})); return; }
-            if (!(Object.keys(chans).includes(dataJson.chan))) { ws.send(JSON.stringify({type: 'error', logText: 'Invalid channel specified'})); return; }
-            if (chans[dataJson.chan].users.length === chans[dataJson.chan].maxUsers) { ws.send(JSON.stringify({type: 'error', logText: 'Channel is full'})); return; }
-            if (ws._chan) { ws.send(JSON.stringify({type: 'error', logText: 'Please leave current channel first'})); return; }
-            
-            chans[dataJson.chan].users.push(ws._user_id);
-            ws._chan = dataJson.chan;
-            ws.send(JSON.stringify({type: 'logs', logText: 'Joined ' + dataJson.chan}));
-            wss.clients.forEach(client => {
-                if (client.readyState === WebSocket.OPEN && client._chan === ws._chan) { client.send(JSON.stringify({type: 'logs', logText:ws._user_id + ' joined the channel'})) }
-            });
-            return; 
-        } else if (dataJson?.type === 'leave-chan') {
-            if (ws._chan) {
-                chans[ws._chan].users = chans[ws._chan].users.filter(user => user !== ws._user_id);
-                ws.send(JSON.stringify({type: 'logs', logText: 'Left ' + ws._chan}));
+    let messageType;
+    if (jsonData.type) { messageType = jsonData.type; }
+    else { console.error('No message type was provided.'); return; }
 
-                // broadcast to all channel members
-                wss.clients.forEach(client => {
-                    if (client.readyState === WebSocket.OPEN && client._chan === ws._chan) { client.send(JSON.stringify({type: 'logs', logText:ws._user_id + ' left the channel'})) }
-                });
-                ws._chan = null;
-            }
-            return;
-        } else if (dataJson?.type === 'ping') {
-            console.log('received a ping from ', ws._user_id);
-            ws._last_pinged = Date.now();
-        } else if (dataJson?.type === 'set_name') {
-            console.log(ws._user_id + ' wants to set their name to ' + dataJson.username);
-            ws._display_name = dataJson.username ?? ws._user_id;
+    /* handle different possible message types */
+    if (messageType === 'move') { handleClientMoveMessage(user, jsonData); }
+    else if (messageType === 'join-chan') { handleClientJoinChannelMessage(jsonData); }
+    else if (messageType === 'leave-chan') { handleClientLeaveChannelMessage(jsonData); }
+    else if (messageType === 'ping') { handleClientPingMessage(user, jsonData); }
+    else if (messageType === 'set_name') { handleClientNameChangeMessage(user, jsonData); }
+    else { handleClientChatMessage(user, jsonData); }
+    
+    console.log(user._user_id);
+}
 
-            sendPositionsAll();
+function handleClientMoveMessage(user, data) {
+    /* Update the user's target position */
+    if (!(data.targetPos)) { console.error('User tried to move but no target position.');return; } 
+    if (isValidTargetPosition(data.targetPos)) {
+        if (isOutOfWorldBounds(data.targetPos)) { 
+            console.error('User tried to move but target position was out of bounds: ', JSON.stringify(data.targetPos));
             return;
         }
-        
-        const logMsg = { user: ws._user_id, content: dataJson.q?.toString(), at: Date.now(), chan: dataJson.chan };
-        messageObjs.push(logMsg); 
-        // console.log(logMsg);
-        
-        if (dataJson.chan && dataJson.chan === 'global') {
-            wss.clients.forEach(client => {
-                if (client.readyState === WebSocket.OPEN) { client.send(JSON.stringify({type: 'logs', logText:ws._user_id + ' says: ' + dataJson.q})) }
-            });
-        } else if (dataJson.chan) {
-            if (!(Object.keys(chans).includes(dataJson.chan))) { ws.send(JSON.stringify({type: 'error', logText: 'No such channel: ' + dataJson.chan})); return; }
-            if (ws._chan !== dataJson.chan) { ws.send(JSON.stringify({type: 'error', logText: 'You are not a member of this channel'})); return; }
-            /* only broadcast to chan members */
-            wss.clients.forEach(client => {
-                if (client.readyState === WebSocket.OPEN && client._chan === dataJson.chan) { client.send(JSON.stringify({type: 'logs', logText:ws._user_id + ' says: ' + dataJson.q})) }
-            });
-        }
+
+        /* user position should be valid */
+        setUserTargetPosition(user, newTargetPositionObj(data.targetPos));
+
+    } else {
+        console.error('User tried to move but target position was invalid.')
+    }
+}
+
+function handleClientJoinChannelMessage(data) {
+
+}
+
+function handleClientLeaveChannelMessage(data) {
+
+}
+
+function handleClientPingMessage(user, data) {
+    user._last_pinged_time = Date.now();
+}
+
+function handleClientNameChangeMessage(user, data) {
+    user._display_name = data.username ?? ws._user_id;
+}
+
+function handleClientChatMessage(user, data) {
+    if (data.chan && data.chan === 'global') {
+        const messageBroadcastTargets = wss.clients; /* to all connected clients */
+        broadcastMessageToClients(user._user_id, data, messageBroadcastTargets);
+    }
+}
+
+/* event handler helpers */
+
+function alertExistingClients(userId, userMap, action) {
+    /* alert existing clients that a new client has joined/left */
+    const messageBroadcastTargets = wss.clients;
+
+    let actionMessage;
+
+    if (action === 'join') {
+        actionMessage = ' joined the server'
+    } else if (action === 'leave') {
+        actionMessage = ' left the server'
+    } else if (action === 'kick') {
+        actionMessage = ' was kicked'
+    }
+
+    messageBroadcastTargets.forEach(client => {
+        client.send(JSON.stringify({type: 'logs', logText: userId + actionMessage}));
+        client.send(JSON.stringify({type: 'ulist-update', ulist: Object.keys(userMap)}));
+
+        syncAllUserPositionsWith(client, userMap);
     });
+}
 
-    wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
-            // client.send('a websocket connection was opened');
-            client.send(JSON.stringify({type: 'logs', logText:ws._user_id + ' joined the server'}));
-            client.send(JSON.stringify({type: 'ulist-update', ulist: Object.keys(userMap)}));
+/* 
+* the client argument is the one we want to sync with (i.e make sure they have up-to-date positions on all players)
+*/
+function syncAllUserPositionsWith(client, userMap) {
+    /* initialize the payload object */
+    const payload = { type: 'playerPositions', positions: {}, refresh: true };
 
-            sendPositionsAll(client);
+    /* build the payload with all user positions */
+    for (const userId of Object.keys(userMap)) {
+        const user = userMap[userId];
+        payload.positions[userId] = objectCopy(user._current_position);
+        
+        /* also provide details on color and name (visuals) */
+        payload.positions[userId].color = user._avatar_color;
+        payload.positions[userId]._display_name = user._display_name ? user._display_name : user._user_id;
+    };
 
+    if (client.readyState === WebSocket.OPEN) { client.send(JSON.stringify(payload)); }
+}
+
+function broadcastMessageToClients(senderId, message, clients) {
+    if (!(message.q)) { console.error('User tried to send a message but no q property found...'); return; }
+    message.q = message.q.substring(0, MAX_MESSAGE_CHARACTER_LENGTH);
+    clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) { client.send(JSON.stringify(createUserChatMessage(senderId, message.q))); }
+    });
+}
+
+function setUserTargetPosition(user, targetPos) {
+    user._target_position = targetPos;
+    if (JSON.stringify(user._current_position) !== JSON.stringify(user._target_position)) { user._is_moving = true; }
+}
+
+function exceededRateLimit(user) {
+    const now = Date.now();
+    const timeSinceLastRateLimitCheck = now - user._last_rate_limit_reset;
+
+    if (timeSinceLastRateLimitCheck > 1000) { /* milliseconds */
+        user._messages_past_second = 0;
+        user._last_rate_limit_reset = now;
+    }
+
+    return (user._messages_past_second > MAX_MESSAGES_PER_SECOND);
+}
+
+function incrementUserMessageCount(user) {
+    user._messages_past_second++;
+}
+
+
+function sendRateLimitExceededError(user) {
+
+}
+
+function addToUserMap(uMap, id ,user) {
+    uMap[id] = user;
+}
+
+
+function initializeUserProperties(user, userId) {
+    user._user_id = userId;
+
+    /* networking */
+    user._connected_channel = null;
+    user._last_pinged_time = Date.now();
+
+    user._messages_past_second = 0;
+    user._last_rate_limit_reset = Date.now();
+
+    user._current_position = { x: 0, y: 0 };
+    user._target_position = { x: 0, y: 0 };
+    user._max_speed = 6; /* units per second */
+    user._is_moving = false;
+    user._avatar_color = getRandomColor();
+
+    console.log('Client properties initialized...');
+}
+
+/* helpers */
+function generateUserId(idLength, existingIds) { /* keep generating until not in existing Ids */
     
-        }
+    let generatedId = createRandomString(idLength);
+
+    while (existingIds.includes(generatedId)) {
+        generatedId = createRandomString(idLength);
+    }
+
+    return generatedId;
+}
+
+function isValidTargetPosition(targetPos) {
+    return (typeof targetPos.x === 'number' && typeof targetPos.y === 'number');
+}
+
+function isOutOfWorldBounds(targetPos) {
+    return (targetPos.x < MIN_WORLD_LIMIT || targetPos.x > MAX_WORLD_LIMIT || targetPos.y < MIN_WORLD_LIMIT || targetPos.y > MAX_WORLD_LIMIT);
+}
+
+function newTargetPositionObj(targetPos) {
+    return { x: targetPos.x, y: targetPos.y };
+}
+
+function createUserChatMessage(userId, message) {
+    return {type: 'logs', logText:userId + ' says: ' + message};
+}
+
+function objectCopy(obj) {
+    return JSON.parse(JSON.stringify(obj));
+}
+
+/* server tick logic */
+setInterval(serverTick, 1000 / SERVER_TICK_RATE_HZ, userMap);
+setInterval(serverCheckGhosts, MAX_USER_TIMEOUT, userMap);
+wss.previousTickTimeStamp = Date.now();
+
+function serverTick(userMap) {
+    const now = Date.now();
+    const deltaTime = now - wss.previousTickTimeStamp;
+    wss.previousTickTimeStamp = now;
+
+    movePlayers(userMap, deltaTime);
+
+    const messageBroadcastTargets = wss.clients;
+
+    messageBroadcastTargets.forEach(client => {
+        syncAllUserPositionsWith(client, userMap);
     });
+}
 
-    ws.on('close', function message() {
-        numConnections--;
-        // users = users.filter(item => item !== ws._user_id);
-        delete userMap[ws._user_id];
-        wss.clients.forEach(client => {
-            if (client.readyState === WebSocket.OPEN) { 
-                // client.send('a websocket was closed'); 
-                client.send(JSON.stringify({type: 'logs', logText:ws._user_id + ' left the server'}));
-                client.send(JSON.stringify({type: 'ulist-update', ulist: Object.keys(userMap)}));
+function movePlayers(userMap, deltaTime) {
 
-                sendPositionsAll(client);
-            }
-        })
-    });
-    console.log('total connected users: ' + numConnections);
-});
-
-setInterval(serverTick, 1000 / 50, userMap);
-
-setInterval(checkGhosts, MAX_USER_TIMEOUT, userMap);
-
-function checkGhosts(userMap) {
-    const currentTime = Date.now();
-
-    for (const user of Object.keys(userMap)) {
-        // console.log(userMap[user]?._last_pinged);
-        if (!(userMap[user]?._last_pinged)) {
-                kickUser(user);
-                continue;
+    for (const userId of Object.keys(userMap)) {
+        const user = userMap[userId];
+        if (user._is_moving) {
+            const userNewPosition = lerp(user._current_position, user._target_position, user._max_speed, deltaTime);
+            user._current_position.x = userNewPosition.x;
+            user._current_position.y = userNewPosition.y;
+            if (user._current_position.x === user._target_position.x && user._current_position.y === user._target_position.y) { user._is_moving = false; }
         }
+    }
+}
 
-        const timeSinceLastPing = currentTime - userMap[user]._last_pinged;
-        // console.log(user + ' time since last ping: ', timeSinceLastPing);
-        if (timeSinceLastPing > MAX_USER_TIMEOUT) { kickUser( user ); }
+function serverCheckGhosts(userMap) {
+    const now = Date.now();
+
+    for (const userId of Object.keys(userMap)) {
+        const user = userMap[userId];
+        if (!(user._last_pinged_time)) { kickUser(user); continue; }
+        const timeSinceLastPing = now - user._last_pinged_time;
+
+        if (timeSinceLastPing > MAX_USER_TIMEOUT) { kickUser(user); }
     }
 }
 
 function kickUser(user) {
-
-    console.log('kicking user ', user);
-
-    wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) { 
-            // client.send('a websocket was closed'); 
-            client.send(JSON.stringify({type: 'logs', logText:user + ' was kicked'}));
-            client.send(JSON.stringify({type: 'ulist-update', ulist: Object.keys(userMap)}));
-
-            sendPositionsAll(client);
-        }
-    });
-    if (userMap[user].readyState === WebSocket.OPEN) { userMap[user].terminate(); }
-
-    numConnections--;
-    // users = users.filter(item => item !== user);
-    delete userMap[user];
-
+    delete userMap[user._user_id];
+    alertExistingClients(user._user_id, userMap, 'kick');
+    if (user.readyState === WebSocket.OPEN) { user.terminate(); }
 }
-
-function sendPositionsAll(client) {
-    /* refresh all positions for all players because someone just joined*/
-    const payload = { type: "playerPositions" ,  positions: {  }, refresh: true};
-
-    for (const user of wss.clients) {
-        console.log(user._display_name);
-        payload.positions[user._user_id] = JSON.parse(JSON.stringify(user._cur_pos));
-        if (client?._user_id === user._user_id) { payload.positions[user._user_id].self = true }
-        payload.positions[user._user_id].color = user._color;
-        payload.positions[user._user_id]._display_name = user._display_name ? user._display_name : user._user_id;
-    }
-    if (client?.readyState === WebSocket.OPEN) {
-        // client.send('a websocket connection was opened');
-        // console.log(JSON.stringify(payload) + " sent to " + client._user_id);
-        console.log(payload);
-        client.send(JSON.stringify(payload));
-    }
-}
-
-let previousTickTimeStamp = Date.now();
-
-async function serverTick(userMap) {
-
-    /* get time elapsed from previous tick */
-    const currentTime = Date.now();
-    let deltaTime = currentTime - previousTickTimeStamp;
-    previousTickTimeStamp = currentTime;
-
-    /* check if we need to move any players */
-
-    const payload = { type: 'playerPositions', positions: { } };
-
-    Object.values(userMap).forEach(user => {
-        if (user._moving) {
-
-            const userNewPosition = lerp(user._cur_pos, user._target_pos, user._max_speed, deltaTime);
-            user._cur_pos = userNewPosition;
-            payload.positions[user._user_id] = JSON.parse(JSON.stringify(user._cur_pos));
-            payload.positions[user._user_id].color = user._color;
-            payload.positions[user._user_id]._display_name = user._display_name;
-            // console.log(JSON.stringify(user._cur_pos));
-            if (user._cur_pos.x === user._target_pos.x && user._cur_pos.y === user._target_pos.y) { user._moving = false; }
-        }
-    });
-
-    if (!(Object.keys(payload.positions).length)) return; /* no need to broadcast if nothing has changed */
-
-    /* broadcast the new user positions */
-    wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
-            // client.send('a websocket connection was opened');
-            client.send(JSON.stringify(payload));
-        }
-    });
-
-};
