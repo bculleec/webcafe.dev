@@ -122,7 +122,7 @@ function handleClientNameChangeMessage(user, data) {
 function handleClientChatMessage(user, data) {
     if (data.chan && data.chan === 'global') {
         const messageBroadcastTargets = wss.clients; /* to all connected clients */
-        broadcastMessageToClients(user._user_id, data, messageBroadcastTargets);
+        broadcastMessageToClients(user._display_name || user._user_id, data, messageBroadcastTargets);
     }
 }
 
@@ -165,16 +165,17 @@ function syncAllUserPositionsWith(client, userMap) {
         /* also provide details on color and name (visuals) */
         payload.positions[userId].color = user._avatar_color;
         payload.positions[userId]._display_name = user._display_name ? user._display_name : user._user_id;
+        if (client._user_id === userId) { payload.positions[userId].self = true; }
     };
 
     if (client.readyState === WebSocket.OPEN) { client.send(JSON.stringify(payload)); }
 }
 
-function broadcastMessageToClients(senderId, message, clients) {
+function broadcastMessageToClients(senderName, message, clients) {
     if (!(message.q)) { console.error('User tried to send a message but no q property found...'); return; }
     message.q = message.q.substring(0, MAX_MESSAGE_CHARACTER_LENGTH);
     clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) { client.send(JSON.stringify(createUserChatMessage(senderId, message.q))); }
+        if (client.readyState === WebSocket.OPEN) { client.send(JSON.stringify(createUserChatMessage(senderName, message.q))); }
     });
 }
 
