@@ -2,6 +2,9 @@
 
 import { WebSocketServer } from "ws";
 import { createRandomString, getRandomColor, lerp } from "./helpers.js";
+import { zones } from './zones.js';
+
+console.log(zones);
 
 /* constants */
 const SERVER_LISTEN_PORT = 8080;
@@ -281,7 +284,6 @@ function serverTick(userMap) {
 }
 
 function movePlayers(userMap, deltaTime) {
-
     for (const userId of Object.keys(userMap)) {
         const user = userMap[userId];
         if (user._is_moving) {
@@ -289,6 +291,17 @@ function movePlayers(userMap, deltaTime) {
             user._current_position.x = userNewPosition.x;
             user._current_position.y = userNewPosition.y;
             if (user._current_position.x === user._target_position.x && user._current_position.y === user._target_position.y) { user._is_moving = false; }
+            const zone = userInZone(user, zones);
+            if (zone) { user._current_position._zone = zone; }
+            else {user._current_position._zone = null;}
+        } 
+    }
+}
+
+function userInZone(user, zones) {
+    for (const zone of zones) {
+        if (user._current_position.x >= zone.x1 && user._current_position.x <= zone.x2 && user._current_position.y >= zone.z1 && user._current_position.y <= zone.z2) {
+            return zone.name;
         }
     }
 }
